@@ -1,0 +1,12 @@
+*
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!main.py
+!database.py
+!storage.py
+!schemas.py
+!errors.py
+!dashboard.py
+!dashboard.html

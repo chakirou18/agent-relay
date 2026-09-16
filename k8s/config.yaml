@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: relay-database
+data:
+  POSTGRES_HOST: postgres
+  POSTGRES_DB: relay
+  POSTGRES_USER: relay
+---
+# Local homework credentials only.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: relay-database
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: relay_dev_password

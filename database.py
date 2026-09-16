@@ -1,10 +1,4 @@
-"""SQLite database setup and durable Agent Relay models.
-
-This module is intentionally the only place that knows about SQLite connection
-pragmas and its writer-lock transaction.  The rest of the application talks to
-the models through :mod:`storage`; replacing this module with a PostgreSQL
-engine and a row-locking claim transaction is the planned student exercise.
-"""
+"""SQLite/PostgreSQL setup, durable models, and serialized relay transactions."""
 
 from __future__ import annotations
 
@@ -177,19 +171,24 @@ def db_session() -> Generator[Session, None, None]:
 
 @contextmanager
 def immediate_transaction() -> Generator[Session, None, None]:
-    """Run one SQLite writer transaction before selecting or changing work.
+    """Serialize relay mutations across API processes on either backend.
 
-    SQLite does not support PostgreSQL's ``FOR UPDATE SKIP LOCKED``.  A
-    ``BEGIN IMMEDIATE`` writer reservation serializes claims (and recovery or
-    terminal submissions) across API processes, giving each task one active
-    lease.  This is the intentionally isolated seam for a future PostgreSQL
-    implementation.
+    PostgreSQL uses a database-local transaction advisory lock with a stable
+    application key. Like SQLite's writer reservation, this covers claims,
+    recovery, heartbeats, and idempotent submissions together. It favors the
+    starter's simple correctness model over parallel write throughput. The
+    lock is released automatically on commit, rollback, or connection loss.
     """
 
     connection = engine.connect()
     session = Session(bind=connection, expire_on_commit=False, autoflush=True)
     try:
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        if connection.dialect.name == "sqlite":
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+        elif connection.dialect.name == "postgresql":
+            connection.exec_driver_sql("SELECT pg_advisory_xact_lock(72431901)")
+        else:
+            raise ValueError("Agent Relay supports SQLite and PostgreSQL only")
         yield session
         session.flush()
         connection.commit()

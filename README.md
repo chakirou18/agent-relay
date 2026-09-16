@@ -72,8 +72,9 @@ uv run python main.py worker --agent-id agent_123 --token agt_… --worker-id la
 operations; routes and request models are kept in `main.py` and `schemas.py`.
 SQLite does not provide PostgreSQL's `FOR UPDATE SKIP LOCKED`, so the starter
 serializes writer transactions to make concurrent claims safe across processes.
-Students can port this storage seam to PostgreSQL later without changing the
-HTTP protocol or lifecycle in `SPEC.md`.
+PostgreSQL uses a transaction-scoped advisory lock at the same storage seam,
+preserving these guarantees without changing the HTTP protocol. This simple
+implementation serializes relay mutations rather than parallelizing writers.
 
 Claims are at-least-once and leased for 60 seconds by default. Heartbeats extend
 an active lease. A completion or failure must include the recipient's bearer
@@ -97,6 +98,50 @@ recreates all tables on whatever `RELAY_DATABASE_URL` points at, so stop
 the dev server first or set `RELAY_DATABASE_URL` to a scratch file before
 running tests against another database.
 
-This starter intentionally does not include Docker, Kubernetes, CI, external
-brokers, an LLM, or a PostgreSQL implementation. Those are deployment and
-student-port concerns rather than part of the local relay protocol.
+## Run with PostgreSQL and Docker Compose
+
+Run `docker compose up --build -d`, then open <http://127.0.0.1:8000/>.
+The `relay` service waits for the `postgres` healthcheck. Its
+`RELAY_DATABASE_URL` is
+`postgresql+psycopg://relay:relay_dev_password@postgres:5432/relay`.
+These credentials are for local development. PostgreSQL data persists in the
+`postgres-data` named volume. Existing SQLite files are not imported.
+
+To run the live HTTP test in PowerShell:
+
+```powershell
+$env:RELAY_TEST_BASE_URL = 'http://127.0.0.1:8000'
+.venv\Scripts\python.exe -m pytest -q -s test_live_api.py
+```
+
+The live test creates fresh identities without resetting the database.
+Keep the other tests on a separate scratch database because their fixture
+drops tables. `docker compose down` stops the stack and retains its data.
+
+## Run in local Kubernetes (kind)
+
+```powershell
+kind create cluster --name agent-relay --wait 120s
+docker build -t agent-relay:local .
+kind load docker-image agent-relay:local postgres:17-bookworm --name agent-relay
+kubectl --context kind-agent-relay apply -f k8s/
+kubectl --context kind-agent-relay rollout status statefulset/postgres --timeout=180s
+kubectl --context kind-agent-relay rollout status deployment/agent-relay --timeout=180s
+# Free port 8000 if the previous Compose API is still running:
+docker compose stop relay
+kubectl --context kind-agent-relay port-forward service/agent-relay 8000:8000 --address 127.0.0.1
+```
+
+Keep port-forward running, then use the same dashboard URL and live test above.
+The manifests include local-development credentials, a ConfigMap, a Secret,
+and a PostgreSQL PVC. The API uses the loaded image with `imagePullPolicy: Never`.
+Data survives PostgreSQL pod replacement; deleting the kind cluster removes
+its local storage. The Kubernetes database is separate from the Compose database.
+
+If Docker Desktop's multi-platform image metadata causes `kind load docker-image`
+to fail with `content digest ... not found`, load an architecture-specific archive:
+
+```powershell
+docker image save --platform linux/amd64 -o "$env:TEMP\agent-relay-kind-images.tar" agent-relay:local postgres:17-bookworm
+kind load image-archive "$env:TEMP\agent-relay-kind-images.tar" --name agent-relay
+```

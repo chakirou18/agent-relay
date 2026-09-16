@@ -1,0 +1,82 @@
+name: Agent Relay CI/CD
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-build-deploy:
+    runs-on: ubuntu-latest
+    env:
+      RELAY_DATABASE_URL: postgresql+psycopg://relay:relay_dev_password@127.0.0.1:5432/relay_ci
+      RELAY_TEST_BASE_URL: http://127.0.0.1:8000
+      IMAGE_TAG: agent-relay:${{ github.sha }}-${{ github.run_id }}
+      KIND_CLUSTER: agent-relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: 'latest'
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Start PostgreSQL for tests
+        run: |
+          docker rm -f relay-ci-postgres >/dev/null 2>&1 || true
+          docker run -d --name relay-ci-postgres -p 5432:5432 \
+            -e POSTGRES_DB=relay_ci -e POSTGRES_USER=relay \
+            -e POSTGRES_PASSWORD=relay_dev_password postgres:17-bookworm
+          for attempt in $(seq 1 30); do
+            docker exec relay-ci-postgres pg_isready -U relay -d relay_ci && exit 0
+            sleep 1
+          done
+          docker logs relay-ci-postgres
+          exit 1
+      - name: Run starter tests
+        run: uv run pytest -q test_agent_relay.py
+      - name: Start API for PostgreSQL integration test
+        run: |
+          uv run uvicorn main:app --host 0.0.0.0 --port 8000 > relay-ci.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:8000/ready && exit 0
+            sleep 1
+          done
+          cat relay-ci.log
+          exit 1
+      - name: Run PostgreSQL integration test
+        run: uv run pytest -q -s test_live_api.py
+      - name: Build unique image
+        run: |
+          IMAGE_TAG="agent-relay:${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+          docker build -t "${IMAGE_TAG}" .
+      - name: Install local Kubernetes tools
+        run: |
+          if ! command -v kind >/dev/null 2>&1; then
+            curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+            install -m 0755 /tmp/kind /usr/local/bin/kind
+          fi
+          if ! command -v kubectl >/dev/null 2>&1; then
+            curl -fsSLo /tmp/kubectl https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl
+            install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+          fi
+          kind export kubeconfig --name "$KIND_CLUSTER"
+      - name: Load image into kind
+        run: kind load docker-image "$IMAGE_TAG" --name "$KIND_CLUSTER"
+      - name: Deploy image and wait for rollout
+        run: |
+          kubectl --context "kind-$KIND_CLUSTER" set image deployment/agent-relay relay="$IMAGE_TAG"
+          kubectl --context "kind-$KIND_CLUSTER" rollout status deployment/agent-relay --timeout=180s
+          kubectl --context "kind-$KIND_CLUSTER" get pods,deployments,services,pvc
+      - name: Verify deployed API
+        run: |
+          kubectl --context "kind-$KIND_CLUSTER" port-forward service/agent-relay 18000:8000 > port-forward.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:18000/ready && exit 0
+            sleep 1
+          done
+          cat port-forward.log
+          exit 1

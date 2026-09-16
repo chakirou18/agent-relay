@@ -2,8 +2,7 @@
 
 Routes and the worker call these functions instead of issuing SQL directly.
 Claim, heartbeat, terminal submission, and recovery each use the same atomic
-SQLite transaction seam, which is the one area students will later replace by
-PostgreSQL row-locking operations.
+transaction seam for SQLite and PostgreSQL.
 """
 
 from __future__ import annotations
