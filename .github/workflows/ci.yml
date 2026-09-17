@@ -63,11 +63,20 @@ jobs:
             curl -fsSLo /tmp/kubectl https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl
             install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
           fi
+      - name: Ensure kind cluster exists
+        run: |
+          clusters=$(kind get clusters)
+          if ! grep -Fxq "$KIND_CLUSTER" <<< "$clusters"; then
+            kind create cluster --name "$KIND_CLUSTER" --wait 180s
+          fi
           kind export kubeconfig --name "$KIND_CLUSTER"
       - name: Load image into kind
         run: kind load docker-image "$IMAGE_TAG" --name "$KIND_CLUSTER"
       - name: Deploy image and wait for rollout
         run: |
+          kubectl --context "kind-$KIND_CLUSTER" apply -f k8s/config.yaml -f k8s/postgres.yaml
+          kubectl --context "kind-$KIND_CLUSTER" rollout status statefulset/postgres --timeout=180s
+          kubectl --context "kind-$KIND_CLUSTER" apply -f k8s/relay.yaml
           kubectl --context "kind-$KIND_CLUSTER" set image deployment/agent-relay relay="$IMAGE_TAG"
           kubectl --context "kind-$KIND_CLUSTER" rollout status deployment/agent-relay --timeout=180s
           kubectl --context "kind-$KIND_CLUSTER" get pods,deployments,services,pvc
